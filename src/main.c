@@ -50,6 +50,7 @@
 #define TRANSACTION_setCallback 1
 #define TRANSACTION_OEMHOOK_RAW_REQUEST 2
 
+#define QCOM_HOOK_RESPONSE_RAW 1
 #define QCOM_HOOK_INDICATION_RAW 1
 
 #define OEM_CHARS {'Q', 'O', 'E', 'M', 'H', 'O', 'O', 'K'}
@@ -84,7 +85,7 @@ typedef struct {
   gint8 isReady RADIO_ALIGNED(1);     /* 1 = ready, 0 = not ready */
 } RADIO_ALIGNED(4) AtelReadyPayload;
 
-static gint32 serial = 1; // first serial value
+static gint32 global_serial = 1; // first serial value
 static const char pname[] = "fake-qcrilmsgtunnel";
 
 static void app_dump_data(const GBinderReader *reader, const char *prefix) {
@@ -175,7 +176,8 @@ static gboolean parse_oem_hook_message(const void *data, gsize data_len,
 
   // validate size for payload
   if (resp_size > 0 && data_len < lenmin + *resp_size) {
-    GERR("parse_oem_hook_message: data size is smaller (%zu) than expected (%zu)",
+    GERR("parse_oem_hook_message: data size is smaller (%zu) than expected "
+         "(%zu)",
          data_len, lenmin + *resp_size);
     return FALSE;
   }
@@ -192,11 +194,65 @@ static GBinderLocalReply *resp_tx_handler(GBinderLocalObject *obj,
   GBinderReader reader;
   gbinder_remote_request_init_reader(req, &reader);
 
-  GINFO("Response transaction %u received", code);
-  app_dump_data(&reader, "    ");
+  // GINFO("Response transaction %u received", code);
+  // app_dump_data(&reader, "    ");
+
+  if (code == QCOM_HOOK_RESPONSE_RAW) {
+    gint32 serial = 0;
+    gint32 err = 0;
+    gsize len, elemsize;
+    const void *data;
+    if (gbinder_reader_read_int32(&reader, &serial) &&
+        gbinder_reader_read_int32(&reader, &err)) {
+      data = gbinder_reader_read_hidl_vec(&reader, &len, &elemsize);
+      const gsize buflen = len * elemsize;
+      GINFO("Response QCOM_HOOK_RESPONSE_RAW: serial=%d; err=%d; data_len=%lu",
+            serial, err, buflen);
+      if (buflen > 0 && data)
+        gutil_log_dump(&gutil_log_default, GLOG_LEVEL_DEFAULT,
+                       "payload: ", data, buflen < 256 ? buflen : 256);
+
+    } else {
+      GERR("Error while reading response transaction %u", code);
+    }
+
+  } else {
+    GINFO("Unhandled response transaction %u", code);
+  }
 
   *status = GBINDER_STATUS_OK;
   return NULL;
+}
+
+static const char *get_oem_response_action(gint32 response_id) {
+  switch (response_id) {
+  case 525299:
+    return "IncrNwScanInd";
+  case 525300:
+    return "EngineerMode";
+  case 525302:
+    return "DeviceConfig";
+  case 525303:
+    return "AudioStateChanged";
+  case 525305:
+    return "ClearConfigs";
+  case 525311:
+    return "ValidateConfigs";
+  case 525312:
+    return "ValidateDumped";
+  case 525320:
+    return "PdcConfigsList";
+  case 525322:
+    return "AdnInitDone";
+  case 525323:
+    return "AdnRecordsInd";
+  case 525340:
+    return "CsgChangedInd";
+  case 525341:
+    return "RacChange";
+  default:
+    return "";
+  }
 }
 
 static GBinderLocalReply *ind_tx_handler(GBinderLocalObject *obj,
@@ -204,13 +260,9 @@ static GBinderLocalReply *ind_tx_handler(GBinderLocalObject *obj,
                                          guint flags, int *status,
                                          void *user_data) {
   GBinderReader reader;
-  const char *iface = gbinder_remote_request_interface(req);
   gbinder_remote_request_init_reader(req, &reader);
 
-  GINFO("Indication transaction %u received", code);
-  GINFO("iface: %s", iface ? iface : "unknown");
-
-  // app_dump_data(&reader, "    ");
+  // app_dump_data(&reader, "ind    ");
 
   if (code == QCOM_HOOK_INDICATION_RAW) {
     gsize len, elemsize;
@@ -225,13 +277,18 @@ static GBinderLocalReply *ind_tx_handler(GBinderLocalObject *obj,
     if (parse_oem_hook_message(data, buflen, &oem_hook_id, &resp_id, &resp_size,
                                &resp_data)) {
       if (oem_hook_id == 1028)
-        GINFO("Received RIL_UNSOL_OEM_HOOK_RAW with resp_id=%d resp_siz=%d", resp_id, resp_size);
+        GINFO(
+            "Received RIL_UNSOL_OEM_HOOK_RAW with resp_id=%d %s; resp_size=%d",
+            resp_id, get_oem_response_action(resp_id), resp_size);
       else
-        GINFO("Received unknown message");
-      gutil_log_dump(&gutil_log_default, GLOG_LEVEL_DEFAULT,
-                     "payload: ", resp_data, resp_size < 256 ? resp_size : 256);
+        GINFO("Received unknown QCOM_HOOK_INDICATION_RAW indication");
+      if (resp_size > 0 && resp_data)
+        gutil_log_dump(&gutil_log_default, GLOG_LEVEL_DEFAULT,
+                       "payload: ", resp_data,
+                       resp_size < 256 ? resp_size : 256);
     } else {
-      GINFO("Failed to parse indication using RAW format. oem_id=%d. Ignoring "
+      GINFO("Failed to parse QCOM_HOOK_INDICATION_RAW indication using RAW "
+            "format. oem_id=%d. Ignoring "
             "message",
             oem_hook_id);
     }
@@ -258,7 +315,7 @@ static int send_atel_ready(App *app, int slot) {
     return 0;
 
   gbinder_local_request_init_writer(req, &writer);
-  gbinder_writer_append_int32(&writer, serial++);
+  gbinder_writer_append_int32(&writer, global_serial++);
   gbinder_writer_append_hidl_vec(&writer, &payload, buflen, sizeof(gint8));
 
   int status = 0;
