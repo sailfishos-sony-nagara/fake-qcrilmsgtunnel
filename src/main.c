@@ -38,14 +38,10 @@
 
 #define RADIO_ALIGNED(x) __attribute__((aligned(x)))
 
-#define DEVICE "/dev/hwbinder"
-#define QCRILHOOK_NAME "oemhook0"
-#define QCRILHOOK_IFACE "vendor.qti.hardware.radio.qcrilhook@1.0::IQtiOemHook"
-#define QCRILHOOK_FQNAME (QCRILHOOK_IFACE "/" QCRILHOOK_NAME)
-#define QCRILHOOK_RESP_IFACE                                                   \
-  "vendor.qti.hardware.radio.qcrilhook@1.0::IQtiOemHookResponse"
-#define QCRILHOOK_IND_IFACE                                                    \
-  "vendor.qti.hardware.radio.qcrilhook@1.0::IQtiOemHookIndication"
+#define DEVICE_DEFAULT "/dev/hwbinder"
+#define QCRILHOOK_NAME_DEFAULT "oemhook0"
+#define QCRILHOOK_IFACE_DEFAULT                                                \
+  "vendor.qti.hardware.radio.qcrilhook@1.0::IQtiOemHook"
 
 #define TRANSACTION_setCallback 1
 #define TRANSACTION_OEMHOOK_RAW_REQUEST 2
@@ -64,6 +60,15 @@
 #define RET_INVARG (2)
 #define RET_ERR (3)
 
+typedef struct app_config {
+  char *device;
+  char *interface;
+  char *name;
+  char *fqname;
+  char *resp_iface;
+  char *ind_iface;
+} AppConfig;
+
 typedef struct app {
   GMainLoop *loop;
   GBinderServiceManager *sm;
@@ -74,6 +79,7 @@ typedef struct app {
   GBinderClient *client;
   GBinderLocalObject *resp;
   GBinderLocalObject *ind;
+  AppConfig config;
   int ret;
 } App;
 
@@ -87,6 +93,55 @@ typedef struct {
 
 static gint32 global_serial = 1; // first serial value
 static const char pname[] = "fake-qcrilmsgtunnel";
+
+// Command line options
+static char *opt_device = NULL;
+static char *opt_interface = NULL;
+static char *opt_name = NULL;
+static gboolean opt_verbose = FALSE;
+
+static GOptionEntry option_entries[] = {
+    {"device", 'd', 0, G_OPTION_ARG_STRING, &opt_device,
+     "Binder device path (default: " DEVICE_DEFAULT ")", "PATH"},
+    {"interface", 'i', 0, G_OPTION_ARG_STRING, &opt_interface,
+     "HIDL/AIDL interface name (default: " QCRILHOOK_IFACE_DEFAULT ")",
+     "INTERFACE"},
+    {"name", 'n', 0, G_OPTION_ARG_STRING, &opt_name,
+     "Service name (default: " QCRILHOOK_NAME_DEFAULT ")", "NAME"},
+    {"verbose", 'v', 0, G_OPTION_ARG_NONE, &opt_verbose,
+     "Enable verbose logging", NULL},
+    {NULL}};
+
+static void app_config_init(AppConfig *config) {
+  config->device = g_strdup(opt_device ? opt_device : DEVICE_DEFAULT);
+  config->interface =
+      g_strdup(opt_interface ? opt_interface : QCRILHOOK_IFACE_DEFAULT);
+  config->name = g_strdup(opt_name ? opt_name : QCRILHOOK_NAME_DEFAULT);
+
+  // Build FQNAME from interface and name
+  config->fqname = g_strdup_printf("%s/%s", config->interface, config->name);
+
+  // Build used interfaces
+  config->resp_iface = g_strdup_printf("%sResponse", config->interface);
+  config->ind_iface = g_strdup_printf("%sIndication", config->interface);
+
+  GINFO("Configuration:");
+  GINFO("  Device: %s", config->device);
+  GINFO("  Interface: %s", config->interface);
+  GINFO("  Name: %s", config->name);
+  GINFO("  FQNAME: %s", config->fqname);
+  GINFO("  Response Interface: %s", config->resp_iface);
+  GINFO("  Indication Interface: %s", config->ind_iface);
+}
+
+static void app_config_cleanup(AppConfig *config) {
+  g_free(config->device);
+  g_free(config->interface);
+  g_free(config->name);
+  g_free(config->fqname);
+  g_free(config->resp_iface);
+  g_free(config->ind_iface);
+}
 
 static void app_dump_data(const GBinderReader *reader, const char *prefix) {
   const int level = GLOG_LEVEL_DEFAULT;
@@ -119,12 +174,12 @@ static void app_remote_died(GBinderRemoteObject *obj, void *user_data) {
 
 static gboolean app_connect_remote(App *app) {
   app->remote = gbinder_servicemanager_get_service_sync(
-      app->sm, QCRILHOOK_FQNAME, NULL); /* autoreleased pointer */
+      app->sm, app->config.fqname, NULL); /* autoreleased pointer */
 
   if (app->remote) {
-    GINFO("Connected to %s", QCRILHOOK_FQNAME);
+    GINFO("Connected to %s", app->config.fqname);
     gbinder_remote_object_ref(app->remote);
-    app->client = gbinder_client_new(app->remote, QCRILHOOK_IFACE);
+    app->client = gbinder_client_new(app->remote, app->config.interface);
     app->death_id = gbinder_remote_object_add_death_handler(
         app->remote, app_remote_died, app);
     return TRUE;
@@ -175,7 +230,7 @@ static gboolean parse_oem_hook_message(const void *data, gsize data_len,
   ptr += sizeof(gint32);
 
   // validate size for payload
-  if (resp_size > 0 && data_len < lenmin + *resp_size) {
+  if (*resp_size > 0 && data_len < lenmin + *resp_size) {
     GERR("parse_oem_hook_message: data size is smaller (%zu) than expected "
          "(%zu)",
          data_len, lenmin + *resp_size);
@@ -191,6 +246,7 @@ static GBinderLocalReply *resp_tx_handler(GBinderLocalObject *obj,
                                           GBinderRemoteRequest *req, guint code,
                                           guint flags, int *status,
                                           void *user_data) {
+  App *app = user_data;
   GBinderReader reader;
   gbinder_remote_request_init_reader(req, &reader);
 
@@ -206,7 +262,8 @@ static GBinderLocalReply *resp_tx_handler(GBinderLocalObject *obj,
         gbinder_reader_read_int32(&reader, &err)) {
       data = gbinder_reader_read_hidl_vec(&reader, &len, &elemsize);
       const gsize buflen = len * elemsize;
-      GINFO("Response QCOM_HOOK_RESPONSE_RAW: serial=%d; err=%d; data_len=%lu",
+      GINFO("Response QCOM_HOOK_RESPONSE_RAW: serial=%d; err=%d; "
+            "data_len=%lu",
             serial, err, buflen);
       if (buflen > 0 && data)
         gutil_log_dump(&gutil_log_default, GLOG_LEVEL_DEFAULT,
@@ -259,6 +316,7 @@ static GBinderLocalReply *ind_tx_handler(GBinderLocalObject *obj,
                                          GBinderRemoteRequest *req, guint code,
                                          guint flags, int *status,
                                          void *user_data) {
+  App *app = user_data;
   GBinderReader reader;
   gbinder_remote_request_init_reader(req, &reader);
 
@@ -277,9 +335,9 @@ static GBinderLocalReply *ind_tx_handler(GBinderLocalObject *obj,
     if (parse_oem_hook_message(data, buflen, &oem_hook_id, &resp_id, &resp_size,
                                &resp_data)) {
       if (oem_hook_id == 1028)
-        GINFO(
-            "Received RIL_UNSOL_OEM_HOOK_RAW with resp_id=%d %s; resp_size=%d",
-            resp_id, get_oem_response_action(resp_id), resp_size);
+        GINFO("Received RIL_UNSOL_OEM_HOOK_RAW with resp_id=%d %s; "
+              "resp_size=%d",
+              resp_id, get_oem_response_action(resp_id), resp_size);
       else
         GINFO("Received unknown QCOM_HOOK_INDICATION_RAW indication");
       if (resp_size > 0 && resp_data)
@@ -301,7 +359,7 @@ static GBinderLocalReply *ind_tx_handler(GBinderLocalObject *obj,
 }
 
 // send ATEL ready over IQtiOemHook
-static int send_atel_ready(App *app, int slot) {
+static int send_atel_ready(App *app) {
   AtelReadyPayload payload = {.oem = OEM_CHARS,
                               .requestId = QCRIL_EVT_HOOK_SET_ATEL_UI_STATUS,
                               .payloadLen = 1,
@@ -320,8 +378,8 @@ static int send_atel_ready(App *app, int slot) {
 
   int status = 0;
 
-  GINFO("Sending ATEL ready (slot %d), buflen=%zu, transaction=%u", slot,
-        buflen, TRANSACTION_OEMHOOK_RAW_REQUEST);
+  GINFO("Sending ATEL ready, buflen=%zu, transaction=%u", buflen,
+        TRANSACTION_OEMHOOK_RAW_REQUEST);
 
   GBinderRemoteReply *reply = gbinder_client_transact_sync_reply(
       app->client, TRANSACTION_OEMHOOK_RAW_REQUEST, req, &status);
@@ -338,9 +396,6 @@ static int send_atel_ready(App *app, int slot) {
     GBinderReader reader;
     gbinder_remote_reply_init_reader(reply, &reader);
 
-    /* Many HIDL calls return a tuple (int32 error, vec<uint8_t> data) or
-       nothing. You can try to read an int32 return and/or a hidl vec. We'll
-       just dump bytes if present. */
     gsize len = 0, elemsz = 0;
     const void *rdata = gbinder_reader_read_hidl_vec(&reader, &len, &elemsz);
     if (rdata && len > 0) {
@@ -363,7 +418,7 @@ static void app_registration_handler(GBinderServiceManager *sm,
   App *app = user_data;
 
   GDEBUG("\"%s\" appeared", name);
-  if (!strcmp(name, QCRILHOOK_FQNAME) && app_connect_remote(app)) {
+  if (!strcmp(name, app->config.fqname) && app_connect_remote(app)) {
     gbinder_servicemanager_remove_handler(app->sm, app->wait_id);
     app->wait_id = 0;
   }
@@ -397,20 +452,20 @@ static void app_run(App *app) {
   guint sigint = g_unix_signal_add(SIGINT, app_signal, app);
 
   if (!app_connect_remote(app)) {
-    GINFO("Waiting for %s", QCRILHOOK_FQNAME);
+    GINFO("Waiting for %s", app->config.fqname);
     app->wait_id = gbinder_servicemanager_add_registration_handler(
-        app->sm, QCRILHOOK_FQNAME, app_registration_handler, app);
+        app->sm, app->config.fqname, app_registration_handler, app);
   }
 
   // init
   app->resp = gbinder_servicemanager_new_local_object(
-      app->sm, QCRILHOOK_RESP_IFACE, resp_tx_handler, app);
+      app->sm, app->config.resp_iface, resp_tx_handler, app);
   app->ind = gbinder_servicemanager_new_local_object(
-      app->sm, QCRILHOOK_IND_IFACE, ind_tx_handler, app);
+      app->sm, app->config.ind_iface, ind_tx_handler, app);
 
   // set callback
   if (app_set_callback(app)) {
-    if (!send_atel_ready(app, 0)) {
+    if (!send_atel_ready(app)) {
       GERR("Failed to send ATEL ready");
     } else {
       GINFO("ATEL ready sent");
@@ -433,22 +488,57 @@ static void app_run(App *app) {
   gbinder_client_unref(app->client);
 }
 
+static gboolean parse_options(int argc, char *argv[]) {
+  GError *error = NULL;
+  GOptionContext *context;
+
+  context = g_option_context_new("- QCom RIL message tunnel");
+  g_option_context_add_main_entries(context, option_entries, NULL);
+  g_option_context_set_summary(context,
+                               "Fake QCRil message tunnel for gbinder "
+                               "communication with QCom RIL services.");
+
+  if (!g_option_context_parse(context, &argc, &argv, &error)) {
+    g_printerr("Option parsing failed: %s\n", error->message);
+    g_error_free(error);
+    g_option_context_free(context);
+    return FALSE;
+  }
+
+  g_option_context_free(context);
+  return TRUE;
+}
+
 int main(int argc, char *argv[]) {
   App app;
 
   memset(&app, 0, sizeof(app));
   app.ret = RET_INVARG;
 
-  gutil_log_timestamp = FALSE;
-  gutil_log_set_type(GLOG_TYPE_STDERR, pname);
-  gutil_log_default.level = GLOG_LEVEL_DEFAULT;
+  // Parse command line options
+  if (!parse_options(argc, argv)) {
+    return RET_INVARG;
+  }
 
-  app.sm = gbinder_servicemanager_new(DEVICE);
+  // Initialize configuration from parsed options
+  app_config_init(&app.config);
+
+  gutil_log_timestamp = FALSE;
+  gutil_log_set_type(GLOG_TYPE_STDERR, app.config.name);
+  gutil_log_default.level =
+      opt_verbose ? GLOG_LEVEL_VERBOSE : GLOG_LEVEL_DEFAULT;
+
+  app.sm = gbinder_servicemanager_new(app.config.device);
   if (app.sm) {
     app.local =
         gbinder_servicemanager_new_local_object(app.sm, NULL, NULL, NULL);
     app_run(&app);
     gbinder_servicemanager_unref(app.sm);
+    // Cleanup configuration
+    app_config_cleanup(&app.config);
+  } else {
+    GERR("Failed to create service manager for device: %s", app.config.device);
+    app.ret = RET_ERR;
   }
 
   return app.ret;
