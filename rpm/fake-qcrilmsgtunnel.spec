@@ -32,9 +32,9 @@ make %{?_smp_mflags}
 rm -rf %{buildroot}
 (cd build-rpm && make DESTDIR=%{buildroot} install)
 
-#install -d $RPM_BUILD_ROOT%{_unitdir}/graphical.target.wants/
-#install -m 644 -D %{name}.service %{buildroot}%{_unitdir}/%{name}.service
-#ln -s ../%{name}.service $RPM_BUILD_ROOT%{_unitdir}/graphical.target.wants/%{name}.service
+install -d $RPM_BUILD_ROOT%{_unitdir}/graphical.target.wants/
+install -m 644 -D %{name}.service %{buildroot}%{_unitdir}/%{name}.service
+ln -s ../%{name}.service $RPM_BUILD_ROOT%{_unitdir}/graphical.target.wants/%{name}.service
 
 %preun
 systemctl daemon-reload || :
@@ -45,5 +45,5 @@ systemctl daemon-reload || :
 %files
 %defattr(-,root,root,-)
 %{_sbindir}/%{name}
-#{_unitdir}/%{name}.service
-#{_unitdir}/graphical.target.wants/%{name}.service
+%{_unitdir}/%{name}.service
+%{_unitdir}/graphical.target.wants/%{name}.service

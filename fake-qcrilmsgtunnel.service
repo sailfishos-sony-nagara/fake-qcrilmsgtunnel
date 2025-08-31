@@ -1,0 +1,10 @@
+[Unit]
+Description=Fake QcRil Message Tunnel Service
+After=droid-hal-init.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/fake-qcrilmsgtunnel
+
+[Install]
+WantedBy=graphical.target
