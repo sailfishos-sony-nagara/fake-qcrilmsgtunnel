@@ -26,6 +26,7 @@ add_definitions(
 
 add_executable(fake-qcrilmsgtunnel
   src/main.c
+  src/qcriltunnel.c
   )
 
 target_link_libraries(

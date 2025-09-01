@@ -1,0 +1,6 @@
+
+build-rpm/
+.mb2/
+/documentation.list
+/RPMS
+
