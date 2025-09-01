@@ -1,4 +1,12 @@
-#include "tunnel.h"
+/*
+ * Copyright (C) 2018 Jolla Ltd.
+ * Copyright (C) 2018 Slava Monich <slava.monich@jolla.com>
+ * Copyright (C) 2025 Rinigus https://github.com/rinigus
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+
+ #include "tunnel.h"
 
 #include <gutil_log.h>
 
