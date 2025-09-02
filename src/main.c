@@ -15,7 +15,7 @@
 // Command line options
 static char *opt_device = NULL;
 static char *opt_interface = NULL;
-static char *opt_name = NULL;
+static gint opt_sim = 0;
 static gboolean opt_verbose = FALSE;
 
 static GOptionEntry option_entries[] = {
@@ -24,8 +24,8 @@ static GOptionEntry option_entries[] = {
     {"interface", 'i', 0, G_OPTION_ARG_STRING, &opt_interface,
      "HIDL/AIDL interface name (default: " QCRILHOOK_IFACE_DEFAULT ")",
      "INTERFACE"},
-    {"name", 'n', 0, G_OPTION_ARG_STRING, &opt_name,
-     "Service name (default: " QCRILHOOK_NAME_DEFAULT ")", "NAME"},
+    {"sim", 's', 0, G_OPTION_ARG_INT, &opt_sim, "SIM slot index (default: 0)",
+     "INDEX"},
     {"verbose", 'v', 0, G_OPTION_ARG_NONE, &opt_verbose,
      "Enable verbose logging", NULL},
     {NULL}};
@@ -34,9 +34,9 @@ static void app_config_init(AppConfig *config) {
   config->device = g_strdup(opt_device ? opt_device : DEVICE_DEFAULT);
   config->interface =
       g_strdup(opt_interface ? opt_interface : QCRILHOOK_IFACE_DEFAULT);
-  config->name = g_strdup(opt_name ? opt_name : QCRILHOOK_NAME_DEFAULT);
+  config->sim = opt_sim;
 
-  // Build FQNAME from interface and name
+  config->name = g_strdup_printf("%s%d", QCRILHOOK_NAME_BASE, config->sim);
   config->fqname = g_strdup_printf("%s/%s", config->interface, config->name);
 
   // Build used interfaces
@@ -72,11 +72,17 @@ static gboolean app_signal(gpointer user_data) {
 static void app_remote_died(GBinderRemoteObject *obj, void *user_data) {
   App *app = user_data;
 
-  GINFO("Remote has died, exiting...");
-  g_main_loop_quit(app->loop);
+  GINFO("Remote has died, waiting for the next one...");
+
+  app->hidl_connected = FALSE;
+  app->callbacks_set = FALSE;
 }
 
 static gboolean app_connect_remote(App *app) {
+  // check if connection has been established already
+  if (app->callbacks_set)
+    return;
+
   app->remote = gbinder_servicemanager_get_service_sync(
       app->sm, app->config.fqname, NULL); /* autoreleased pointer */
 
@@ -86,8 +92,11 @@ static gboolean app_connect_remote(App *app) {
     app->client = gbinder_client_new(app->remote, app->config.interface);
     app->death_id = gbinder_remote_object_add_death_handler(
         app->remote, app_remote_died, app);
+    app->hidl_connected = TRUE;
     return TRUE;
   }
+
+  app->hidl_connected = FALSE;
   return FALSE;
 }
 
@@ -95,64 +104,81 @@ static void app_registration_handler(GBinderServiceManager *sm,
                                      const char *name, void *user_data) {
   App *app = user_data;
 
-  GDEBUG("\"%s\" appeared", name);
-  if (!strcmp(name, app->config.fqname) && app_connect_remote(app)) {
-    gbinder_servicemanager_remove_handler(app->sm, app->wait_id);
-    app->wait_id = 0;
+  if (!strcmp(name, app->config.fqname)) {
+    GINFO("%s appeared", name);
+
+    if (app_connect_remote(app) && app_set_callback(app)) {
+      gboolean unlocked = sim_monitor_is_unlocked(app->sim_monitor);
+      if (unlocked)
+        send_atel_ready(app);
+    }
   }
 }
 
-static int app_set_callback(App *app) {
-  GBinderLocalRequest *req = gbinder_client_new_request(app->client);
+// Ofono SIM unlock callback
+static void on_sim_unlocked(gpointer user_data) {
+  App *app = user_data;
+  SimMonitor *monitor = app->sim_monitor;
+  gboolean unlocked = sim_monitor_is_unlocked(monitor);
 
-  // write the two strong binder objects into the request:
-  gbinder_local_request_append_local_object(req, app->resp);
-  gbinder_local_request_append_local_object(req, app->ind);
+  if (!unlocked)
+    return;
 
-  int status = 0;
-  GBinderRemoteReply *reply = gbinder_client_transact_sync_reply(
-      app->client, TRANSACTION_setCallback, req, &status);
+  GINFO("=== SIM %u UNLOCKED ===", app->config.sim);
 
-  if (status == GBINDER_STATUS_OK) {
-    GINFO("setCallback succeeded");
+  // Only send ATEL ready if we have HIDL connection and callbacks set
+  if (app->hidl_connected && (app->callbacks_set || app_set_callback(app))) {
+    if (!send_atel_ready(app)) {
+      GERR("Failed to send ATEL ready after SIM unlock");
+    }
   } else {
-    GERR("setCallback failed, status %d", status);
-    return 0;
+    GINFO("Waiting for HIDL connection before sending ATEL ready");
   }
+}
 
-  gbinder_remote_reply_unref(reply);
-  gbinder_local_request_unref(req);
-  return 1;
+// Ofono availability callback
+static void on_ofono_availability(gboolean available, gpointer user_data) {
+  App *app = user_data;
+
+  if (available) {
+    gboolean unlocked = sim_monitor_is_unlocked(app->sim_monitor);
+    GINFO("oFono became available");
+    if (unlocked && app->hidl_connected &&
+        (app->callbacks_set || app_set_callback(app))) {
+      if (!send_atel_ready(app)) {
+        GERR("Failed to send ATEL ready after Ofono start");
+      }
+    }
+  } else {
+    GINFO("oFono became unavailable");
+  }
 }
 
 static void app_run(App *app) {
   guint sigtrm = g_unix_signal_add(SIGTERM, app_signal, app);
   guint sigint = g_unix_signal_add(SIGINT, app_signal, app);
 
-  if (!app_connect_remote(app)) {
-    GINFO("Waiting for %s", app->config.fqname);
-    app->wait_id = gbinder_servicemanager_add_registration_handler(
-        app->sm, app->config.fqname, app_registration_handler, app);
+  app->hidl_connected = FALSE;
+  app->callbacks_set = FALSE;
+
+  GINFO("Initializing SIM monitor...");
+  app->sim_monitor =
+      sim_monitor_new(on_sim_unlocked, on_ofono_availability, app);
+  if (!app->sim_monitor) {
+    GERR("Failed to create SIM monitor - exit");
+    app->ret = RET_ERR;
+    return;
   }
 
-  // init
-  app->resp = gbinder_servicemanager_new_local_object(
-      app->sm, app->config.resp_iface, resp_tx_handler, app);
-  app->ind = gbinder_servicemanager_new_local_object(
-      app->sm, app->config.ind_iface, ind_tx_handler, app);
+  app->wait_id = gbinder_servicemanager_add_registration_handler(
+      app->sm, app->config.fqname, app_registration_handler, app);
+  GINFO("Waiting for %s", app->config.fqname);
 
-  // set callback
-  if (app_set_callback(app)) {
-    if (!send_atel_ready(app)) {
-      GERR("Failed to send ATEL ready");
-    } else {
-      GINFO("ATEL ready sent");
-    }
+  sim_monitor_start(app->sim_monitor, app->config.sim);
 
-    app->loop = g_main_loop_new(NULL, TRUE);
-    app->ret = RET_OK;
-    g_main_loop_run(app->loop);
-  }
+  app->loop = g_main_loop_new(NULL, TRUE);
+  app->ret = RET_OK;
+  g_main_loop_run(app->loop);
 
   g_source_remove(sigtrm);
   g_source_remove(sigint);
@@ -164,6 +190,12 @@ static void app_run(App *app) {
   gbinder_local_object_drop(app->resp);
   gbinder_local_object_drop(app->ind);
   gbinder_client_unref(app->client);
+
+  if (app->sim_monitor) {
+    sim_monitor_stop(app->sim_monitor);
+    sim_monitor_free(app->sim_monitor);
+    app->sim_monitor = NULL;
+  }
 }
 
 static gboolean parse_options(int argc, char *argv[]) {

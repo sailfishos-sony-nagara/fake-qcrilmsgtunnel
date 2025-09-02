@@ -3,7 +3,7 @@ project(fake-qcrilmsgtunnel C)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GBINDER REQUIRED libgbinder)
-pkg_check_modules(GLIB REQUIRED glib-2.0)
+pkg_check_modules(GLIB REQUIRED glib-2.0 gobject-2.0 gio-2.0)
 pkg_check_modules(GLIBUTIL REQUIRED libglibutil)
 
 include_directories(
@@ -27,6 +27,7 @@ add_definitions(
 add_executable(fake-qcrilmsgtunnel
   src/main.c
   src/qcriltunnel.c
+  src/sim_monitor.c
   )
 
 target_link_libraries(

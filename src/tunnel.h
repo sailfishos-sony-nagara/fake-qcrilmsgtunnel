@@ -11,10 +11,12 @@
 
 #include <gbinder.h>
 
+#include "sim_monitor.h"
+
 #define RADIO_ALIGNED(x) __attribute__((aligned(x)))
 
 #define DEVICE_DEFAULT "/dev/hwbinder"
-#define QCRILHOOK_NAME_DEFAULT "oemhook0"
+#define QCRILHOOK_NAME_BASE "oemhook"
 #define QCRILHOOK_IFACE_DEFAULT                                                \
   "vendor.qti.hardware.radio.qcrilhook@1.0::IQtiOemHook"
 
@@ -42,6 +44,7 @@ typedef struct app_config {
   char *fqname;
   char *resp_iface;
   char *ind_iface;
+  int sim;
 } AppConfig;
 
 typedef struct app {
@@ -54,6 +57,9 @@ typedef struct app {
   GBinderClient *client;
   GBinderLocalObject *resp;
   GBinderLocalObject *ind;
+  SimMonitor *sim_monitor;
+  gboolean hidl_connected;
+  gboolean callbacks_set;
   AppConfig config;
   int ret;
 } App;
@@ -67,14 +73,8 @@ typedef struct {
 } RADIO_ALIGNED(4) AtelReadyPayload;
 
 ////
-extern GBinderLocalReply *resp_tx_handler(GBinderLocalObject *obj,
-                                          GBinderRemoteRequest *req, guint code,
-                                          guint flags, int *status,
-                                          void *user_data);
-extern GBinderLocalReply *ind_tx_handler(GBinderLocalObject *obj,
-                                         GBinderRemoteRequest *req, guint code,
-                                         guint flags, int *status,
-                                         void *user_data);
+extern int app_set_callback(App *app);
+
 extern int send_atel_ready(App *app);
 
 #endif

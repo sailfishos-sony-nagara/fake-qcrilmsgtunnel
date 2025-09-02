@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
- #include "tunnel.h"
+#include "tunnel.h"
 
 #include <gutil_log.h>
 
@@ -81,9 +81,10 @@ static gboolean parse_oem_hook_message(const void *data, gsize data_len,
   return TRUE;
 }
 
-GBinderLocalReply *resp_tx_handler(GBinderLocalObject *obj,
-                                   GBinderRemoteRequest *req, guint code,
-                                   guint flags, int *status, void *user_data) {
+static GBinderLocalReply *resp_tx_handler(GBinderLocalObject *obj,
+                                          GBinderRemoteRequest *req, guint code,
+                                          guint flags, int *status,
+                                          void *user_data) {
   App *app = user_data;
   GBinderReader reader;
   gbinder_remote_request_init_reader(req, &reader);
@@ -150,9 +151,10 @@ static const char *get_oem_response_action(gint32 response_id) {
   }
 }
 
-GBinderLocalReply *ind_tx_handler(GBinderLocalObject *obj,
-                                  GBinderRemoteRequest *req, guint code,
-                                  guint flags, int *status, void *user_data) {
+static GBinderLocalReply *ind_tx_handler(GBinderLocalObject *obj,
+                                         GBinderRemoteRequest *req, guint code,
+                                         guint flags, int *status,
+                                         void *user_data) {
   App *app = user_data;
   GBinderReader reader;
   gbinder_remote_request_init_reader(req, &reader);
@@ -247,5 +249,41 @@ int send_atel_ready(App *app) {
   }
 
   gbinder_local_request_unref(req);
+
+  GINFO("ATEL ready sent successfully");
   return 1;
+}
+
+gboolean app_set_callback(App *app) {
+  // check if callback has been set already
+  if (app->callbacks_set)
+    return;
+
+  GBinderLocalRequest *req = gbinder_client_new_request(app->client);
+
+  app->resp = gbinder_servicemanager_new_local_object(
+      app->sm, app->config.resp_iface, resp_tx_handler, app);
+  app->ind = gbinder_servicemanager_new_local_object(
+      app->sm, app->config.ind_iface, ind_tx_handler, app);
+
+  // write the two strong binder objects into the request:
+  gbinder_local_request_append_local_object(req, app->resp);
+  gbinder_local_request_append_local_object(req, app->ind);
+
+  int status = 0;
+  GBinderRemoteReply *reply = gbinder_client_transact_sync_reply(
+      app->client, TRANSACTION_setCallback, req, &status);
+
+  if (status == GBINDER_STATUS_OK) {
+    GINFO("%s: setCallback succeeded", app->config.interface);
+    app->callbacks_set = TRUE;
+  } else {
+    GERR("%s: setCallback failed, status %d", app->config.interface, status);
+    app->callbacks_set = FALSE;
+    return FALSE;
+  }
+
+  gbinder_remote_reply_unref(reply);
+  gbinder_local_request_unref(req);
+  return TRUE;
 }
