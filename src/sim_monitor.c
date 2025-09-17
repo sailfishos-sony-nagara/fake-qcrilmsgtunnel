@@ -165,6 +165,10 @@ static void sim_monitor_property_changed(
   GVariant *property_value;
   g_variant_get(parameters, "(sv)", &property_name, &property_value);
 
+  gchar *value_str = g_variant_print(property_value, TRUE);
+  GINFO("SIM property changed: %s -> %s", property_name, value_str);
+  g_free(value_str);
+
   if (g_strcmp0(property_name, "PinRequired") == 0) {
     gboolean was_unlocked = monitor->is_unlocked;
 
