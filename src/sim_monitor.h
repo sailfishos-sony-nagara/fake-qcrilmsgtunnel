@@ -36,6 +36,7 @@ typedef struct sim_monitor {
   guint sim_index;
   gchar *modem_path;
   gboolean is_unlocked;
+  gboolean has_cardidentifier;
   guint signal_id;
   gboolean monitoring;
 } SimMonitor;

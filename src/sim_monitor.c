@@ -119,7 +119,6 @@ static gboolean sim_monitor_get_current_properties(SimMonitor *monitor) {
   // several properties have to either exist or have specific value to
   // indicate that the card is unlocked. Otherwise false positive could
   // happen while card is not loaded into ofono
-  gboolean has_cardidentifier = FALSE;
   gboolean has_nopin = FALSE;
 
   while (g_variant_iter_loop(iter, "{sv}", &key, &value)) {
@@ -128,14 +127,17 @@ static gboolean sim_monitor_get_current_properties(SimMonitor *monitor) {
     g_free(value_str);
 
     if (g_strcmp0(key, "CardIdentifier") == 0)
-      has_cardidentifier = TRUE;
+      monitor->has_cardidentifier = TRUE;
     else if (g_strcmp0(key, "PinRequired") == 0) {
       const gchar *pin_required = g_variant_get_string(value, NULL);
       has_nopin = (g_strcmp0(pin_required, "none") == 0);
     }
   }
 
-  monitor->is_unlocked = (has_cardidentifier && has_nopin);
+  GINFO("SIM %u has cardidentifier: %s", monitor->sim_index,
+        monitor->has_cardidentifier ? "YES" : "NO");
+
+  monitor->is_unlocked = has_nopin;
   GINFO("SIM %u current unlocked: %s", monitor->sim_index,
         monitor->is_unlocked ? "YES" : "NO");
 
@@ -166,17 +168,17 @@ static void sim_monitor_property_changed(
   g_variant_get(parameters, "(sv)", &property_name, &property_value);
 
   gchar *value_str = g_variant_print(property_value, TRUE);
-  GINFO("SIM property changed: %s -> %s", property_name, value_str);
+  GINFO("SIM %u property changed: %s -> %s", monitor->sim_index, property_name, value_str);
   g_free(value_str);
 
-  if (g_strcmp0(property_name, "PinRequired") == 0) {
-    gboolean was_unlocked = monitor->is_unlocked;
+  if (g_strcmp0(property_name, "PinRequired") == 0 || g_strcmp0(property_name, "CardIdentifier") == 0) {
+    gboolean was_unlocked = sim_monitor_is_unlocked(monitor);
 
     // update unlock properties
     sim_monitor_get_current_properties(monitor);
 
     /* Call callback when SIM becomes unlocked */
-    if (!was_unlocked && monitor->is_unlocked && monitor->sim_unlock_callback) {
+    if (!was_unlocked && sim_monitor_is_unlocked(monitor) && monitor->sim_unlock_callback) {
       GINFO("SIM %u unlocked, calling callback", monitor->sim_index);
       monitor->sim_unlock_callback(monitor->user_data);
     }
@@ -198,6 +200,7 @@ sim_monitor_new(SimUnlockedCallback sim_unlock_callback,
   monitor->ofono_available = FALSE;
   monitor->sim_index = UINT_MAX; /* Invalid index initially */
   monitor->is_unlocked = FALSE;
+  monitor->has_cardidentifier = FALSE;
   monitor->monitoring = FALSE;
 
   /* Connect to system D-Bus */
@@ -268,7 +271,11 @@ gboolean sim_monitor_start(SimMonitor *monitor, guint sim_index) {
   /* Call callback immediately if SIM is already unlocked */
   if (monitor->is_unlocked && monitor->sim_unlock_callback) {
     GINFO("SIM %u already unlocked, calling callback", sim_index);
-    monitor->sim_unlock_callback(monitor->user_data);
+    if (monitor->has_cardidentifier) {
+        monitor->sim_unlock_callback(monitor->user_data);
+    } else {
+        GINFO("SIM %u no cardientifier, calling callback NOT!", sim_index);
+    }
   }
 
   return TRUE;
@@ -287,13 +294,14 @@ void sim_monitor_stop(SimMonitor *monitor) {
   g_free(monitor->modem_path);
   monitor->modem_path = NULL;
   monitor->is_unlocked = FALSE;
+  monitor->has_cardidentifier = FALSE;
   monitor->monitoring = FALSE;
 
   GINFO("Stopped monitoring SIM %u", monitor->sim_index);
 }
 
 gboolean sim_monitor_is_unlocked(SimMonitor *monitor) {
-  if (!monitor || !monitor->ofono_available || !monitor->monitoring)
+  if (!monitor || !monitor->ofono_available || !monitor->monitoring || !monitor->has_cardidentifier)
     return FALSE;
 
   return monitor->is_unlocked;
