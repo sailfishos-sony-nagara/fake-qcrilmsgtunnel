@@ -119,23 +119,41 @@ static gboolean sim_monitor_get_current_properties(SimMonitor *monitor) {
   // several properties have to either exist or have specific value to
   // indicate that the card is unlocked. Otherwise false positive could
   // happen while card is not loaded into ofono
+  gboolean has_present = FALSE;
   gboolean has_cardidentifier = FALSE;
   gboolean has_nopin = FALSE;
+  gboolean has_subscriberid = FALSE;
+  gboolean has_mcc = FALSE;
+  gboolean has_mnc = FALSE;
 
   while (g_variant_iter_loop(iter, "{sv}", &key, &value)) {
     gchar *value_str = g_variant_print(value, TRUE);
     GINFO("Properties: %s -> %s", key, value_str);
     g_free(value_str);
 
-    if (g_strcmp0(key, "CardIdentifier") == 0)
+    if (g_strcmp0(key, "Present") == 0) {
+      has_present = g_variant_get_boolean(value);
+    } else if (g_strcmp0(key, "CardIdentifier") == 0) {
       has_cardidentifier = TRUE;
-    else if (g_strcmp0(key, "PinRequired") == 0) {
+    } else if (g_strcmp0(key, "PinRequired") == 0) {
       const gchar *pin_required = g_variant_get_string(value, NULL);
       has_nopin = (g_strcmp0(pin_required, "none") == 0);
+    } else if (g_strcmp0(key, "SubscriberIdentity") == 0) {
+      const gchar *subid = g_variant_get_string(value, NULL);
+      has_subscriberid = (subid && *subid);
+    } else if (g_strcmp0(key, "MobileCountryCode") == 0) {
+      const gchar *mcc = g_variant_get_string(value, NULL);
+      has_mcc = (mcc && *mcc);
+    } else if (g_strcmp0(key, "MobileNetworkCode") == 0) {
+      const gchar *mnc = g_variant_get_string(value, NULL);
+      has_mnc = (mnc && *mnc);
     }
   }
 
-  monitor->is_unlocked = (has_cardidentifier && has_nopin);
+  monitor->is_unlocked =
+      (has_present && has_cardidentifier && has_nopin &&
+       has_subscriberid && has_mcc && has_mnc);
+
   GINFO("SIM %u current unlocked: %s", monitor->sim_index,
         monitor->is_unlocked ? "YES" : "NO");
 
@@ -165,7 +183,17 @@ static void sim_monitor_property_changed(
   GVariant *property_value;
   g_variant_get(parameters, "(sv)", &property_name, &property_value);
 
-  if (g_strcmp0(property_name, "PinRequired") == 0) {
+  gchar *value_str = g_variant_print(property_value, TRUE);
+  GINFO("SIM property changed: %s -> %s", property_name, value_str);
+  g_free(value_str);
+
+  // list all properties that are checked in sim_monitor_get_current_properties
+  if (g_strcmp0(property_name, "Present") == 0 ||
+      g_strcmp0(property_name, "PinRequired") == 0 ||
+      g_strcmp0(property_name, "SubscriberIdentity") == 0 ||
+      g_strcmp0(property_name, "MobileCountryCode") == 0 ||
+      g_strcmp0(property_name, "MobileNetworkCode") == 0 ||
+      g_strcmp0(property_name, "CardIdentifier") == 0) {
     gboolean was_unlocked = monitor->is_unlocked;
 
     // update unlock properties
